@@ -7,6 +7,10 @@ What changed in each release of BeamNG.Earth, newest first.
 ### Fixed
 
 - **Bare earth under overpasses**: a road in a cutting under a bridge deck got no retaining walls there, the slopes beside it bare under the deck (Assaku, Tallinn); the walls now stand under the deck too, up to its underside, and none under a low one.
+- **Guard rails ending short of a bridge**: a guard rail mapped along a bridge's approach that stops a few metres before
+  the deck (the real one meets the bridge's parapet) is now run on to the bridge rail's line, so there is no gap and no
+  end cap between the approach rail and the bridge's own rail (the overpass at Jüri, Estonia: 8.7 m and 7.7 m gaps,
+  the rail ends 2 m outside the bridge's line).
 
 ## 1.8.2 beta (2026-11-05)
 
