@@ -443,6 +443,119 @@ class MeshTest(unittest.TestCase):
         self.assertEqual(spec.roof, "gabled")
 
 
+class NightWindowsTest(unittest.TestCase):
+    """Each lit window its own brightness at night (2026-11-08): each bay of a floor one of the window sheet's night
+    variants, a laid-over window each one of the sash cells; the same every build."""
+
+    class _Mats(dict):
+        def __missing__(self, k):
+            return bld._Looks(1.0)[k]
+
+    def _wall(self, **kw):
+        ring = rect(0, 0, 30, 14)
+        args = dict(ring=ring, floors=6, floor_h=3.0, roof="flat", facade="bne_bld_fac_white", band=bld.BAND_BRICK,
+                    shop=False, plain=False, wall=None, door=(0, 10.0), windows=None, front=0, seed=0.37)
+        args.update(kw)
+        m = bld.Mesh()
+        bld._walls(m, bld.Spec(**args), ring, 0.0, 18.0, self._Mats())
+        return m
+
+    def test_bays_take_the_variants(self):
+        m = self._wall()
+        P = np.array(m.P).reshape(-1, 3)
+        faces = np.array(m.T).reshape(-1, 3)
+        variants = [bld.MATERIALS.index(f) for f in bld.FACADE_VARIANTS]
+        on_edge0 = {}
+        for tri, mi in zip(faces, m.M):
+            self.assertIn(mi, variants)
+            p = P[tri]
+            if np.allclose(p[:, 1], 0.0):                   # the first wall (y = 0)
+                on_edge0.setdefault(round(float(p[:, 2].min()) / 3.0), set()).add(mi)
+        self.assertTrue(all(len(v) > 1 for v in on_edge0.values()), "a floor's bays all one variant")
+        self.assertEqual(m.M, self._wall().M)
+        for f in bld.FACADE_VARIANTS[1:]:
+            self.assertIn(f, bld.MATERIALS)
+
+    def test_towers_take_the_office_variants(self):
+        m = self._wall(facade=f"{bld.OFFICE}|1", band=bld.BAND_OFFICE, floors=20, shop=True)
+        names = {bld.MATERIALS[i] for i in m.M}
+        self.assertTrue(set(bld.OFFICE_VARIANTS) <= names, names)
+        self.assertIn(bld.SHOP, names)                      # (the shopfront floor as it was)
+        self.assertFalse(names & set(bld.FACADE_VARIANTS))
+        # a curtain wall's bays any bay of the band: the bays at one place on the wall differ floor to floor (their lit
+        # bays stood in columns)
+        P = np.array(m.P).reshape(-1, 4, 3)
+        uv = np.array(m.UV).reshape(-1, 8)
+        office = {bld.MATERIALS.index(f) for f in bld.OFFICE_VARIANTS}
+        quad_m = np.array(m.M[::2])
+        at = {}
+        for q, u, mi in zip(P, uv, quad_m):
+            if mi in office and np.allclose(q[:, 1], 0.0) and q[0, 2] > 4.0:
+                at.setdefault(round(float(q[0, 0]), 2), set()).add(round(float(u[0]), 4))
+        self.assertTrue(at and max(len(v) for v in at.values()) > 2, at)
+
+    def test_shopfronts_take_the_shop_variants(self):
+        m = self._wall(facade=f"{bld.OFFICE}|1", band=bld.BAND_OFFICE, floors=8, shop=True)
+        self.assertTrue(set(bld.SHOP_VARIANTS) <= {bld.MATERIALS[i] for i in m.M})
+
+    def test_far_tiles_vary_each_window(self):
+        """Far tiles (lite) too: a floor's bays each their own variant (a variant a floor, its bays shifted, drew
+        zigzags)."""
+        m = self._wall(facade=f"{bld.OFFICE}|1", band=bld.BAND_OFFICE, floors=20, shop=False)
+        lite = bld.Mesh()
+        ring = rect(0, 0, 30, 14)
+        args = dict(ring=ring, floors=20, floor_h=3.0, roof="flat", facade=f"{bld.OFFICE}|1", band=bld.BAND_OFFICE,
+                    shop=False, plain=False, wall=None, door=(0, 10.0), windows=None, front=0, seed=0.37)
+        bld._walls(lite, bld.Spec(**args), ring, 0.0, 60.0, self._Mats(), lite=True)
+        self.assertGreater(lite.n, 4 * 4 * 20)              # more than a quad a floor of each wall
+        self.assertTrue(set(bld.OFFICE_VARIANTS) <= {bld.MATERIALS[i] for i in lite.M})
+        self.assertTrue(m.n)
+
+    def test_skyline_buildings_start_apart(self):
+        ring = rect(0, 0, 40, 30)
+        starts = set()
+        for seed in (0.1, 0.2, 0.3, 0.4, 0.5):
+            sp = bld.Spec(ring=ring, floors=10, floor_h=3.0, roof="flat", facade="bne_bld_fac_white", cls="office",
+                          seed=seed, min_h=0.0, height=30.0, windows=None, roof_mat=None)
+            UV = np.asarray(bld._sky_mesh([(sp, 0.0, 0.0)])[1])
+            starts.add((round(float(UV[0, 0]), 6), round(float(UV[0, 1] % 1.0), 6)))
+            self.assertAlmostEqual(UV[0, 0] * bld.SKY_WIN_BAYS, round(UV[0, 0] * bld.SKY_WIN_BAYS), 6)
+        self.assertGreater(len(starts), 3)
+
+    def test_split_keeps_the_wall(self):
+        """The bays cut from a floor (same-variant neighbours as one quad) cover it exactly, at the sheet's scale."""
+        band = bld.BAND_BRICK
+        ring = rect(0, 0, 30, 14)
+        P, UV, mid = bld.fast._ef.building_walls(ring, 0.0, 18.0, False, False, band[0], band[1], [], 6, 3.0, False,
+                                                 0, 10.0, True, 0.37, False, 0, False, bld._WALL_CONSTS)
+        P2, UV2, mid2 = bld._vary_bays(P, UV, mid, band[0], band[1], 0, (0, 3, 4))
+        self.assertGreater(len(mid2), len(mid))
+
+        def area(pl):
+            q = np.array(pl).reshape(-1, 4, 3)
+            return float(np.linalg.norm(np.cross(q[:, 1] - q[:, 0], q[:, 3] - q[:, 0]), axis=1).sum())
+        self.assertAlmostEqual(area(P), area(P2), 6)
+        q, uv = np.array(P2).reshape(-1, 4, 3), np.array(UV2).reshape(-1, 8)
+        sel = np.isclose(uv[:, 5], 1.0 - band[0] / bld.BANDS - 1.5 / 1024) & (uv[:, 2] - uv[:, 0] > 1e-6)
+        m_per_u = np.linalg.norm(q[sel, 1, :2] - q[sel, 0, :2], axis=1) / (uv[sel, 2] - uv[sel, 0])
+        self.assertTrue(np.all(np.abs(m_per_u / bld.TILE_PX_M - 1.0) < 0.15), m_per_u)
+        bays = np.round((uv[sel, 2] - uv[sel, 0]) * band[1]).astype(int)
+        self.assertTrue((bays == 1).any() and (bays > 1).any(), "bays one a quad, or none kept together")
+
+    def test_laid_over_windows_take_the_sash_cells(self):
+        m = self._wall(floors=2, roof="gable", band=(2, 1), plain=True, wall="siding", door=(0, 0.5))
+        uv = np.array(m.UV).reshape(-1, 8)
+        win = uv[np.isclose(uv[:, 1], bld.WIN_UV[2]) & np.isclose(uv[:, 5], bld.WIN_UV[3])]
+        self.assertGreater(len(win), 6)
+        cells = {tuple(c) for c in np.round(bld.WIN_CELLS, 6).tolist()}
+        got = {(round(a, 6), round(b, 6)) for a, b in win[:, [0, 2]].tolist()}
+        self.assertTrue(got <= cells and len(got) > 1, got)
+        # ... and one of the facade's night variants each (they go dark at their own hours)
+        self.assertTrue(set(bld.FACADE_VARIANTS) <= {bld.MATERIALS[i] for i in m.M})
+        self.assertEqual(m.UV, self._wall(floors=2, roof="gable", band=(2, 1), plain=True, wall="siding",
+                                          door=(0, 0.5)).UV)
+
+
 class DoorTest(unittest.TestCase):
     def test_door_faces_the_road(self):
         spec = bld.plan(rect(0, 0, 10, 8), {"class": "house"})
