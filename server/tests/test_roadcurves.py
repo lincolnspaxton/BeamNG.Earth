@@ -18,6 +18,13 @@ def turns(xy):
 
 
 class RoundLineTest(unittest.TestCase):
+    def test_freeway_joint_rounded(self):
+        # a 2 degree joint on a freeway: a visible kink in a long lane line before (roadcurves 1 left joints under 4)
+        line = np.array([[0.0, 0.0], [200.0, 0.0], [400.0, 200.0 * math.tan(math.radians(2.0))]])
+        out = roadcurves.round_line(line, roadcurves.CLASS_R["motorway"], 7.0)
+        self.assertGreater(len(out), 3)
+        self.assertLessEqual(turns(out).max(), roadcurves.STEP_DEG + 0.1)
+
     # an OSM-style 90 degree residential curve: a node every ~15 m, each a 22.5 degree joint
     a = np.linspace(0, math.pi / 2, 5)
     LINE = np.r_[[[-30.0, 0.0]], np.c_[60 * np.sin(a), 60 - 60 * np.cos(a)], [[60.0, 90.0]]]
@@ -40,7 +47,7 @@ class RoundLineTest(unittest.TestCase):
         self.assertTrue(np.isclose(np.hypot(*(out - self.LINE[3]).T), 0.0).any())
 
     def test_straight_and_gentle_unchanged(self):
-        line = np.array([[0.0, 0.0], [50.0, 0.0], [100.0, 2.0]])        # a 2.3 degree joint
+        line = np.array([[0.0, 0.0], [50.0, 0.0], [100.0, 0.3]])        # a 0.34 degree joint (under BEND_DEG)
         np.testing.assert_array_equal(roadcurves.round_line(line, 35.0, 3.0), line)
 
     def test_deterministic(self):

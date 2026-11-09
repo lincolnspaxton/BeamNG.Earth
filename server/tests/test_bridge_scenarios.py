@@ -122,9 +122,10 @@ class LaneTaperScenarios(unittest.TestCase):
         f = chain([10.0, 16.0])
         self.assertAlmostEqual(width_at(f, 0, 0.0), 13.0, delta=0.05, msg="the narrow one widens to half way")
         self.assertAlmostEqual(width_at(f, 1, 0.0), 13.0, delta=0.05, msg="the wide one narrows to half way")
-        span = float(np.clip(6.0 * roads.TAPER_M_PER_M, *roads.TAPER_M))
+        span = float(roads.road_tapers(f)[0][0][3])     # (a faster road's taper is longer: roads.taper_rate)
+        self.assertGreaterEqual(span, float(np.clip(6.0 * roads.TAPER_M_PER_M, *roads.TAPER_M)) - 1e-6)
         self.assertAlmostEqual(width_at(f, 0, -span - 1), 10.0, delta=0.01, msg="its own width past the taper")
-        self.assertAlmostEqual(width_at(f, 1, span + 1), 16.0, delta=0.01)
+        self.assertAlmostEqual(width_at(f, 1, float(roads.road_tapers(f)[1][0][3]) + 1), 16.0, delta=0.01)
         ws = [width_at(f, 0, x) for x in np.linspace(-span, 0.0, 30)]
         self.assertTrue(np.all(np.diff(ws) >= -1e-9), "widening steadily")
         self.assertLess(float(np.abs(np.diff(ws)).max()), 6.0 / 2 / 30 * 2.0, "no step (smoothstep: at most 1.5x the mean rate)")

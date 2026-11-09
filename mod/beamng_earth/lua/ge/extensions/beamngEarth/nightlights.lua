@@ -25,6 +25,12 @@ M.MATERIALS = {
   -- lit from behind: whiter
   bne_lm_floodlit = { '1 0.86 0.66', 25 },
   bne_lm_dial = { '1 0.97 0.88', 160 },
+  -- the road lines (the stock line materials the road tiles' DecalRoads use): real paint is retroreflective, glass
+  -- beads sending the headlights back, so at night the lines stand out far down the road (the user, 2026-11-08: "the
+  -- lines don't light up like they would in real life"). The renderer has no retroreflection: a faint glow at night
+  -- reads the same from the driver's seat without lighting anything around it.
+  line_white = { '1 1 1', 6 },
+  line_yellow = { '1 0.82 0.35', 5 },
 }
 
 -- The street lamps' light: a pool of LIGHTS_MAX spot lights (no shadows), every LIGHTS_S moved to the lamps nearest
@@ -69,13 +75,18 @@ function M.isNight()
   return st.isNight == true
 end
 
+local original = {}       -- material name -> { emissiveFactor, emissiveIntensityNits } before our first change
+
 local function apply(night)
   for name, glow in pairs(M.MATERIALS) do
     local m = scenetree.findObject(name)
     if m then
       local ok = pcall(function()
-        m:setField('emissiveFactor', 0, night and glow[1] or '0 0 0')
-        m:setField('emissiveIntensityNits', 0, tostring(night and glow[2] or -1))
+        if not original[name] then      -- (the stock line materials: put back as they were by day, not zeroed)
+          original[name] = { m:getField('emissiveFactor', 0) or '0 0 0', m:getField('emissiveIntensityNits', 0) or '-1' }
+        end
+        m:setField('emissiveFactor', 0, night and glow[1] or original[name][1])
+        m:setField('emissiveIntensityNits', 0, night and tostring(glow[2]) or original[name][2])
         m:flush()
         m:reload()
       end)

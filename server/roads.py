@@ -45,7 +45,7 @@ SEND_M = float(os.environ.get("BNE_ROADS_SEND_M", "640"))     # tiles whose squa
                                                                 # (Euclidean, tiles_near: a disc) are sent
 DROP_M = float(os.environ.get("BNE_ROADS_DROP_M", str(SEND_M + 320)))   # ... and dropped beyond this
 OVERLAP = 2.0           # m a road reaches past its tile's edge (no gap at tile seams)
-SIMPLIFY_M = 0.25       # RDP tolerance (Road Spline's layerMgr)
+SIMPLIFY_M = 0.1        # RDP tolerance (Road Spline's layerMgr: 0.25, which merged a freeway's 2 degree arc steps into kinks)
 SIMPLIFY_Z_M = 0.05     # ... and the vertical one of lines drawn at their own heights (decks, tunnels: simplify ztol)
 MAX_NODES = 100         # nodes per DecalRoad (Road Spline's chunk size)
 MAX_SPACING = 12.0      # m between nodes at most (official maps: median 11-12 m)
@@ -445,7 +445,7 @@ def _facts_load(feats, kind, extra):
 # (bakepack.py), in place of the code hash; the plans' key holds it too (plancache.plans_format). Bump it whenever a
 # change makes other facts (level ranges, specs, lane flow, grade separations or their inputs' rules), or players keep
 # the old ones; tests/test_bake_formats.py fails until it is bumped.
-FACTS_FORMAT = 5      # 5: road lines with their bends rounded (roadcurves.py); 4: pass roads with a mapped or default two-lane count stay mountain roads (the Stelvio); 3: PR #471 lane counts (validated highway counts, two-lane highway default) and #686 (Swedish dual carriageways, 2.75 m lanes); 2: OSM's own surface first, "unpaved" on car roads gravel, regional gravel for untagged minor roads
+FACTS_FORMAT = 6      # 6: rounder road lines (roadcurves 2), speed tapers; 5: road lines with their bends rounded (roadcurves.py); 4: pass roads with a mapped or default two-lane count stay mountain roads (the Stelvio); 3: PR #471 lane counts (validated highway counts, two-lane highway default) and #686 (Swedish dual carriageways, 2.75 m lanes); 2: OSM's own surface first, "unpaved" on car roads gravel, regional gravel for untagged minor roads
 
 
 def _facts_baked(feats, kind, extra):
@@ -2023,6 +2023,11 @@ TAPER_M = (15.0, 90.0)          # m: a taper's length at the least and most ...
 TAPER_SHARE = 0.45              # ... and at most this share of the road's length (a taper at each end)
 TAPER_MIN_DW = 0.4              # m of width change that tapers
 TAPER_MAX_TURN = 35.0           # degrees between two roads' directions at a joint: one going on as the other
+# ... and on faster roads as the MUTCD's merging taper (6C.08: L = W x S ft at 45 mph and over, W x S^2 / 60 below): a
+# lane dropped on a 70 mph freeway runs out over ~250 m, not the 43 m TAPER_M_PER_M gave (the user, 2026-11-08 on
+# I-15: "when it changes from 4-lane to 2-lane it doesn't do it very smoothly"). Speed: the road's limit, else its class's.
+TAPER_SPEED_MAX_M = 300.0       # m: a speed taper's length at most
+TAPER_CLASS_KMH = {"motorway": 105.0, "trunk": 90.0, "primary": 70.0, "secondary": 60.0, "tertiary": 50.0}
 
 
 def road_tapers(feats, urban_fn=None, widths=None, left_hand=False):
@@ -2089,7 +2094,35 @@ def _tapers(feats, specs, decks=False):
     for r in np.asarray(rows):
         got.setdefault(int(r[0]), []).append((float(r[1]), float(r[2]), float(r[3]), float(r[4])))
     for i, t in got.items():
-        out[i] = tuple(t)
+        out[i] = tuple(_speed_tapers(t, specs[i], lonlat[off[i]:off[i + 1]]))
+    return out
+
+
+def taper_rate(kmh):
+    """m of taper per m of width change at a speed (km/h): the MUTCD's merging taper (S >= 45 mph: L = W S; below:
+    W S^2 / 60), never under TAPER_M_PER_M. Pure."""
+    mph = float(kmh) / 1.609344
+    return max(TAPER_M_PER_M, mph if mph >= 45.0 else mph * mph / 60.0)
+
+
+def _speed_tapers(rows, sp, ll):
+    """rows (lon, lat, width at the joint, length) of one road lengthened to its speed's taper (taper_rate), within
+    TAPER_SPEED_MAX_M and TAPER_SHARE of the road's length; the kernel's length where that is longer. Pure."""
+    if sp is None or not rows or len(ll) < 2:
+        return rows
+    kmh = sp.kmh if sp.kmh else TAPER_CLASS_KMH.get(sp.cls)
+    if not kmh:
+        return rows
+    rate = taper_rate(kmh)
+    if rate <= TAPER_M_PER_M:
+        return rows
+    lat0 = math.radians(float(np.mean(ll[:, 1])))
+    d = np.diff(ll, axis=0) * np.array([111320.0 * math.cos(lat0), 110574.0])
+    road_len = float(np.hypot(d[:, 0], d[:, 1]).sum())
+    out = []
+    for lon, lat, w_joint, length in rows:
+        want = min(abs(float(w_joint) - float(sp.width)) * rate, TAPER_SPEED_MAX_M, TAPER_SHARE * road_len)
+        out.append((lon, lat, w_joint, max(float(length), want)))
     return out
 
 

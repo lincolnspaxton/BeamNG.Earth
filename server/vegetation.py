@@ -36,7 +36,7 @@ import staging
 
 log = logging.getLogger("earthd.vegetation")
 
-VERSION = 23          # (the cached cells hold their groups: 14 for the regional rules of GitHub #110; 16: the roads'
+VERSION = 24          # (24: desert scrub on dry bare land, ARID_*)  (the cached cells hold their groups: 14 for the regional rules of GitHub #110; 16: the roads'
                       # drawn widths and sidewalks kept clear; 17: BC's lidar canopy heights, mapdata's canopy layer 2;
                       # 18: the rounded junction corners kept clear, roadcorners.py; 19: one tree per flat crown,
                       # thin_tops; 20: none on or beside a bridge deck, _mask_decks; 21: orchard rows, canopy trees
@@ -64,6 +64,14 @@ SCATTER_CELL_M = 6.0        # the hashed scatter's grid (one candidate per cell)
 # of shrubs and vines under the trees; ours were bare ground between trunks), also under the canopy.
 SCATTER_P = {10: (0.30, 0.0), 20: (0.10, 0.04), 30: (0.01, 0.003), 60: (0.0, 0.08), 100: (0.02, 0.02)}
 UNDERSTORY = 10
+# Desert scrub (the user, 2026-11-08 on I-15 north of Las Vegas: "it looks like I'm in a wasteland"): in a dry climate
+# (Koppen B: BWh BWk BSh BSk) the satellite's "bare / sparse" land is creosote and bursage scrub a few metres apart, and its
+# "shrubland" denser; SCATTER_P gave bare land no bush at all. There a bare cell gets a bush with ARID_BARE_BUSH (on
+# ground sloping at least ARID_MIN_SLOPE: a playa, a salt flat or a dry lake bed stays bare), shrubland ARID_SHRUB_BUSH.
+ARID_KOPPEN = (4, 5, 6, 7)
+ARID_BARE_BUSH = 0.16       # ~1 bush per 225 m2 (a 6 m cell's share)
+ARID_SHRUB_BUSH = 0.30
+ARID_MIN_SLOPE = 0.004
 BUILT_NEAR_M = 60.0         # bare ground with built-up land this far around gets no scatter (squares, lots)
 # Rocks on bare ground lie on slopes, outcrops and fans, not on flat playas, salt pans and dry lake beds (the
 # Bonneville Salt Flats had a rock every ~75 m2, the user 2026-10-20; photos: a bare white crust for miles). A bare
@@ -522,6 +530,13 @@ class Vegetation:
                 rock[bare_rock[~keep]] = False
                 free[bare_rock[~keep]] = False     # (nor a bush there: bare ground stays bare)
         bush = free & ~rock & (u < pr + pb)
+        if _arid(lon0, lat0, lon1, lat1):
+            bush |= free & ~rock & (cls == WC["shrub"]) & (u < pr + ARID_SHRUB_BUSH)
+            cand = np.flatnonzero(free & ~rock & ~bush & (cls == WC["bare"]) & (u < pr + ARID_BARE_BUSH))
+            if len(cand) and self.dem is not None:
+                slope = self._slope(px[cand], py[cand])
+                if slope is not None:
+                    bush[cand[slope >= ARID_MIN_SLOPE]] = True
         sel = rock | bush
         n = int(sel.sum())
         size = 0.4 + 1.6 * _hash01(GI[sel], GJ[sel], 14) ** 2
@@ -532,6 +547,15 @@ class Vegetation:
                      _hash01(GI[sel], GJ[sel], 15).astype(np.float32),
                      (_hash01(GI[sel], GJ[sel], 16) * 360.0).astype(np.float32),
                      (0.8 + 0.4 * _hash01(GI[sel], GJ[sel], 17)).astype(np.float32)) if n else _empty()
+
+
+def _arid(lon0, lat0, lon1, lat1):
+    """Is the cell's middle in a dry climate (ARID_KOPPEN)? False when the climate map is missing."""
+    try:
+        import climate
+        return climate.koppen_at((lat0 + lat1) / 2, (lon0 + lon1) / 2) in ARID_KOPPEN
+    except Exception:
+        return False
 
 
 def _thin(jj, ii, h, px):

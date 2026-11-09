@@ -21,15 +21,15 @@ import numpy as np
 
 import mapgeom
 
-VERSION = 1
+VERSION = 2                 # 2: every joint over BEND_DEG 0.5 (the lines on a freeway kinked at 1-4 degree joints)
 ON = os.environ.get("BNE_ROAD_CURVES", "1") != "0"     # (0: the mapped polygon as before)
 
-BEND_DEG = 4.0              # bends sharper than this are rounded
-STEP_DEG = 6.0              # an arc is cut into pieces of at most this (fewer vertices downstream)
-ARM_SHARE = 0.85            # a corner's two arcs may use this share of the segment between them
+BEND_DEG = 0.5              # bends sharper than this are rounded (a 2 degree joint shows in a long lane line)
+STEP_DEG = 2.0              # an arc is cut into pieces of at most this
+ARM_SHARE = 0.95            # a corner's two arcs may use this share of the segment between them
 CONNECTOR_TOL = 0.75        # m: a vertex this close to a connector's position is the junction (pinned)
 CLASS_R = {                 # m, the radius a bend of this class is drawn with at most
-    "motorway": 400.0, "trunk": 250.0, "primary": 150.0, "secondary": 100.0, "tertiary": 70.0,
+    "motorway": 900.0, "trunk": 500.0, "primary": 200.0, "secondary": 100.0, "tertiary": 70.0,
     "unclassified": 45.0, "residential": 35.0, "living_street": 20.0, "service": 15.0, "track": 28.0,
     "unknown": 30.0}
 DEFAULT_R = 25.0
