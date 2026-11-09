@@ -62,6 +62,7 @@ import numpy as np
 
 import geodesy
 import gradesep
+import roadcurves
 import mapcells
 import mapgeom
 import maprasters
@@ -331,7 +332,8 @@ class MapData:
                 "canopy": maprasters.CHM_RELEASE, "rails": rails.known() if rails is not None else None,
                 "lanes": lanes.known() if lanes is not None else None,
                 "gradesep": (gradesep.VERSION, gradesep.MODE) if gradesep.TUNNELS else None,
-                "osmfuel": OSM_POI_VERSION if OSM_FUEL else False}
+                "osmfuel": OSM_POI_VERSION if OSM_FUEL else False,
+                "curves": roadcurves.VERSION if roadcurves.ON else None}
 
     def bundle_versions(self):
         """Offline source identity for prepared road plans, including cached but not yet opened shards.
@@ -723,6 +725,8 @@ class MapData:
                     f = f.localize(frame)
                 self._rails(key, layer, f)
                 self._lanes(key, layer, f)
+                if layer == "roads" and roadcurves.ON:     # (after the tag joins: they match the mapped lines)
+                    f = roadcurves.round_features(f, frame)
                 if layer == "buildings":
                     f = mapgeom.drop_huge(f, BUILDING_MAX_M2)
                 if layer == "roads":

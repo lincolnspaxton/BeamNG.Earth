@@ -269,6 +269,13 @@ HOUSE_CLASSES = {"house", "detached", "semidetached_house", "bungalow", "residen
                  "cabin", "dormitory"}
 ROW_CLASSES = {"terrace"}
 GARAGE_MIN_M2 = 400.0       # a "parking" building this big is a parking structure
+HOUSE_M2 = 260.0            # an unclassified footprint smaller than this (not a shop) is a house ...
+SUBURB_HOUSE_M2 = 520.0     # ... up to this among houses (suburb_flags: a US house and its attached garage)
+SUBURB_ONE_STOREY = 0.55    # a suburb's houses without a height: this share single-storey (more in the arid West)
+SUBURB_REACH_M = 70.0       # suburb_flags: the neighbours within this of a footprint's centre ...
+SUBURB_MIN_N = 4            # ... at least this many ...
+SUBURB_MEDIAN_M2 = (50.0, 400.0)    # ... their median footprint house-sized ...
+SUBURB_SPREAD = 2.6         # ... and this footprint at most this many times it (a school among houses is no house)
 INDUSTRIAL_CLASSES = {"industrial", "warehouse", "manufacture", "factory", "hangar"}
 
 
@@ -325,12 +332,108 @@ def oriented_box(p):
     return c, u, hl, hw
 
 
+# A house whose footprint is not a rectangle (an L with its garage wing, a T, a U) was drawn with a flat roof: most of
+# a US suburb's houses came out as flat-roofed boxes, which read as a city block rather than a neighbourhood (the
+# user, 2026-11-08 at St. George UT). rect_parts splits a near-rectilinear footprint into its main body and wings,
+# each roofed on its own (cross gables / hips), the walls kept on the mapped outline.
+PARTS_MAX = 3               # rectangles a house's roof is made of at most
+PARTS_SQUARE_DEG = 12.0     # every edge longer than PARTS_EDGE_MIN_M within this of the box's axes
+PARTS_EDGE_MIN_M = 1.2
+PARTS_SNAP_M = 0.6          # wall lines closer than this are one line
+PARTS_MIN_SIDE_M = 3.0      # a wing narrower than this is no roof of its own (a bay window, a chimney's step)
+PARTS_MIN_SHARE = 0.08      # ... nor one smaller than this share of the footprint
+PARTS_COVER = 0.88          # the parts cover at least this share of the footprint (the rest: a low flat lid)
+PARTS_MAX_HW = 9.0          # m, a part's half width at most (a pitched roof over a wider span: a warehouse's)
+
+
+def _lines(vals, snap):
+    """Sorted wall-line positions, those closer than snap merged (their mean)."""
+    vals = sorted(float(v) for v in vals)
+    out = [[vals[0]]]
+    for v in vals[1:]:
+        if v - out[-1][-1] < snap:
+            out[-1].append(v)
+        else:
+            out.append([v])
+    return [sum(g) / len(g) for g in out]
+
+
+def rect_parts(ring):
+    """The rectangles [(c, u, hl, hw)] (as oriented_box's) a near-rectilinear footprint (local ring (n, 2)) is made of:
+    its largest inscribed rectangle, then the largest of what is left, up to PARTS_MAX; None when the ring is not
+    rectilinear (an edge off the box's axes), or the parts would not cover it. Pure, deterministic."""
+    ring = np.asarray(ring, np.float64)
+    if len(ring) < 4 or len(ring) > 24:
+        return None
+    c, u, _hl, _hw = oriented_box(ring)
+    v = np.array([-u[1], u[0]])
+    q = np.stack([(ring - c) @ u, (ring - c) @ v], 1)
+    nq = np.roll(q, -1, 0)
+    xs, ys = [], []
+    tol = math.sin(math.radians(PARTS_SQUARE_DEG))
+    for a, b in zip(q, nq):
+        d = b - a
+        L = math.hypot(d[0], d[1])
+        if L < 1e-6:
+            continue
+        if abs(d[1]) / L <= tol:            # along u: a line of constant y
+            ys.append((a[1] + b[1]) / 2)
+        elif abs(d[0]) / L <= tol:          # along v
+            xs.append((a[0] + b[0]) / 2)
+        elif L >= PARTS_EDGE_MIN_M:
+            return None
+    if len(xs) < 2 or len(ys) < 2:
+        return None
+    gx, gy = _lines(xs, PARTS_SNAP_M), _lines(ys, PARTS_SNAP_M)
+    nx, ny = len(gx) - 1, len(gy) - 1
+    if nx < 1 or ny < 1 or nx * ny > 64:
+        return None
+    cx = [(gx[i] + gx[i + 1]) / 2 for i in range(nx)]
+    cy = [(gy[j] + gy[j + 1]) / 2 for j in range(ny)]
+    fill = np.zeros((nx, ny), bool)
+    for i in range(nx):
+        for j in range(ny):
+            fill[i, j] = _inside(q, (cx[i], cy[j]))
+    total = abs(_area2(q)) / 2
+    if total <= 0:
+        return None
+    left = fill.copy()
+    parts, covered = [], 0.0
+    for _ in range(PARTS_MAX):
+        best = None
+        for i0 in range(nx):
+            for i1 in range(i0, nx):
+                for j0 in range(ny):
+                    for j1 in range(j0, ny):
+                        if not left[i0:i1 + 1, j0:j1 + 1].all():
+                            continue
+                        w, h = gx[i1 + 1] - gx[i0], gy[j1 + 1] - gy[j0]
+                        a = w * h
+                        if min(w, h) < PARTS_MIN_SIDE_M or max(w, h) / 2 > 40.0 or min(w, h) / 2 > PARTS_MAX_HW:
+                            continue
+                        if best is None or a > best[0] + 1e-9:
+                            best = (a, i0, i1, j0, j1)
+        if best is None or best[0] < PARTS_MIN_SHARE * total:
+            break
+        a, i0, i1, j0, j1 = best
+        left[i0:i1 + 1, j0:j1 + 1] = False
+        covered += a
+        x0_, x1_, y0_, y1_ = gx[i0], gx[i1 + 1], gy[j0], gy[j1 + 1]
+        pc = c + u * ((x0_ + x1_) / 2) + v * ((y0_ + y1_) / 2)
+        hx, hy = (x1_ - x0_) / 2, (y1_ - y0_) / 2
+        pu = u if hx >= hy else v                   # along the part's long side (its ridge)
+        parts.append((pc, pu, max(hx, hy), min(hx, hy)))
+    if not parts or covered < PARTS_COVER * total:
+        return None
+    return parts
+
+
 # ------------------------------------------------------------------------------------------- the model
 
 class Spec:
     """What is built for one footprint (decided by plan())."""
     __slots__ = ("ring", "floors", "floor_h", "height", "roof", "roof_mat", "facade", "band", "shop", "plain", "min_h", "wall", "door", "windows", "front", "steeple", "stoop",
-                 "sign", "porch", "cls", "seed", "deck", "pitch", "portal", "gring", "ship")
+                 "sign", "porch", "cls", "seed", "deck", "pitch", "portal", "gring", "ship", "parts")
 
     def __init__(self, **kw):
         for k in self.__slots__:
@@ -517,6 +620,10 @@ def plan(ring, attrs, neighbours=0, lat=None, lon=None, look=None, town=False, d
         dense and area < 260 and cls not in SHOP_CLASSES)))
     shed = (cls in SHED_CLASSES and not garage) or (area < 40 and not row)
     shop = cls in SHOP_CLASSES
+    # a footprint among houses (tile_buildings' suburb: its neighbours are house-sized and detached) is a house up to a
+    # US suburban house with its garage (~250-500 m2); elsewhere only up to HOUSE_M2
+    suburb = bool(attrs.get("suburb")) and not dense
+    house_m2 = SUBURB_HOUSE_M2 if suburb and cls in ("", "house", "detached", "residential") else HOUSE_M2
     industrial = cls in INDUSTRIAL_CLASSES or (area > 2500 and cls in ("", "commercial"))
     industrial = industrial and not (garage or terminal)
 
@@ -584,6 +691,11 @@ def plan(ring, attrs, neighbours=0, lat=None, lon=None, look=None, town=False, d
         elif west_town and not industrial and cls != "apartments":
             # Bishop's and Moab's photos (2026-10-14): one-storey shops with false fronts, ranch houses
             nf = 1 if seed < WEST_TOWN_ONE_STOREY else 2
+        elif suburb and (cls in HOUSE_CLASSES or (area < house_m2 and not shop)) and not industrial:
+            # a suburb's houses: mostly one storey (ranch houses; a big footprint is a house and its garage, not a
+            # two-storey mansion), more so in the arid West's stucco suburbs
+            p1 = SUBURB_ONE_STOREY + (0.15 if style.flat else 0.0) + (0.1 if area > HOUSE_M2 else 0.0)
+            nf = 1 if seed < p1 else 2
         elif cls in HOUSE_CLASSES or (area < 220 and not shop):
             nf = 1 if seed < 0.3 else 2
         elif industrial:
@@ -604,7 +716,7 @@ def plan(ring, attrs, neighbours=0, lat=None, lon=None, look=None, town=False, d
     elif roof_given in ("skillion", "dome", "onion", "round", "saltbox"):
         roof = "gabled"
     else:
-        detached_house = (cls in HOUSE_CLASSES or (area < 260 and not shop)) and not industrial and not row
+        detached_house = (cls in HOUSE_CLASSES or (area < house_m2 and not shop)) and not industrial and not row
         if church and neighbours == 0:
             roof = "gabled"
         elif neighbours >= 1:
@@ -624,9 +736,14 @@ def plan(ring, attrs, neighbours=0, lat=None, lon=None, look=None, town=False, d
                 roof = "gabled" if seed < 1.0 - style.hipped else "hipped"
         else:
             roof = "flat"
-    # pitched roofs only on near-rectangular footprints (a church's nave keeps its gable beside a tower or an apse)
-    if roof != "flat" and (box_fill < (0.6 if church else 0.8) or hw < 2.0
-                           or hw > (18.0 if barn else 20.0 if church else 14.0)):
+    # pitched roofs only on near-rectangular footprints (a church's nave keeps its gable beside a tower or an apse); a
+    # detached house's L, T or U is roofed as its rectangles (rect_parts: cross gables), not flat
+    parts = None
+    if roof != "flat" and not (church or barn or shed) and neighbours == 0 and area < house_m2 * 1.2 \
+            and (box_fill < 0.8 or hw > 14.0) and hw >= 2.0:
+        parts = rect_parts(ring)
+    if roof != "flat" and parts is None and (box_fill < (0.6 if church else 0.8) or hw < 2.0
+                                             or hw > (18.0 if barn else 20.0 if church else 14.0)):
         roof = "flat"
     # a city tower's ground floor is shops or a lobby (Midtown, 2026-10-14: most towers have no class, and their
     # curtain wall came down to the pavement)
@@ -675,7 +792,7 @@ def plan(ring, attrs, neighbours=0, lat=None, lon=None, look=None, town=False, d
             band = (BAND_OFFICE if seed < 0.5 else BAND_OFFICE2) if tall else BAND_PANEL
         else:
             u_brick = _hash01(seed, "brick")
-            detached = (cls in HOUSE_CLASSES or (area < 260 and not shop)) and not row and neighbours == 0
+            detached = (cls in HOUSE_CLASSES or (area < house_m2 and not shop)) and not row and neighbours == 0
             brick = u_brick < brick_share(lat, lon) * (1.15 if row else 0.35 if detached else 1.0)
             if brick:
                 band = BAND_BRICK
@@ -690,8 +807,8 @@ def plan(ring, attrs, neighbours=0, lat=None, lon=None, look=None, town=False, d
                     band = (BAND_SASH, BAND_TALL, BAND_PANEL)[int(seed * 104729) % 3]
         plain = False
     wall = None
-    house = (cls in HOUSE_CLASSES or (area < 260 and not shop and not industrial)) and not row and not shed \
-        and neighbours == 0 and area < 300         # a long "residential" block is not a house (Fells Point)
+    house = (cls in HOUSE_CLASSES or (area < house_m2 and not shop and not industrial)) and not row and not shed \
+        and neighbours == 0 and area < max(300.0, house_m2 * 1.2)   # a long "residential" block is not a house (Fells Point)
     if house and band is not BAND_BRICK and nf <= 3:
         # detached houses: siding in the East and South, stucco in the West; windows laid over the wall
         u = _hash01(seed, "wall")
@@ -807,15 +924,15 @@ def plan(ring, attrs, neighbours=0, lat=None, lon=None, look=None, town=False, d
             facade = f"{SIDING}|{int(_hash01(seed, 'sc') * (len(tints) - 2))}"
     # a front porch (the photos of Lancaster, Ocean City, Frederick, Moab: most houses have one): pitched-roof
     # houses, a regional share; doors() puts it on the front door's wall
-    porch = (house and roof != "flat" and not barn and not shed and area < 300
+    porch = (house and roof != "flat" and not barn and not shed and area < max(300.0, house_m2)
              and _hash01(seed, "porch") < style.porch)
-    if porch:   # pitched roofs draw the walls on the oriented box: an L-shaped house's door wall can be inside it
+    if porch and parts is None:   # pitched roofs draw the walls on the oriented box: an L-shaped house's door wall can be inside it
         _, _, hl, hw = oriented_box(ring)
         porch = area >= 0.9 * 4 * hl * hw
     return Spec(ring=ring, floors=nf, floor_h=floor_h, height=h, roof=roof, roof_mat=roof_mat, facade=facade,
                 band=band, shop=shop and not shed and nf >= 1, plain=plain, seed=seed, min_h=0.0, wall=wall,
                 windows=windows, steeple=church and area < 2500, porch=porch, cls=cls,
-                deck=garage and roof == "flat", pitch=style.pitch)
+                deck=garage and roof == "flat", pitch=style.pitch, parts=parts if roof != "flat" else None)
 
 
 class Mesh:
@@ -1038,7 +1155,7 @@ def drawn_ring(spec):
     porch go on these walls (on the map's outline they stood off a box wall at an angle, or inside it, only the
     door's frame showing: Stelvio pass, the user's reports 2026-10-17)."""
     ring = spec.ring
-    if spec.roof != "flat":
+    if spec.roof != "flat" and not spec.parts:     # (a house roofed as its parts: walls on its own outline)
         c, u, hl, hw = oriented_box(ring)
         v = np.array([-u[1], u[0]])
         ring = np.array([c - u * hl - v * hw, c + u * hl - v * hw, c + u * hl + v * hw, c - u * hl + v * hw])
@@ -1177,7 +1294,21 @@ def _roof(m, spec, ring, z_eave, mat_idx):
         uv = [(p[0] / ROOF_UV_M, p[1] / ROOF_UV_M) for p in ring]
         m.poly(pts, uv, rm)
         return
+    if spec.parts:
+        # an L / T / U house: a low lid over the whole outline (what the parts leave: a flat-roofed nook), then each
+        # rectangle's own pitched roof over it (cross gables; the wings' ridges run into the main roof)
+        zl = z_eave - 0.05
+        m.poly([(p[0], p[1], zl) for p in ring], [(p[0] / ROOF_UV_M, p[1] / ROOF_UV_M) for p in ring], rm)
+        for c, u, hl, hw in spec.parts:
+            _pitched(m, spec, np.asarray(c, np.float64), np.asarray(u, np.float64), float(hl), float(hw), z_eave,
+                     rm, mat_idx)
+        return
     c, u, hl, hw = oriented_box(ring)
+    _pitched(m, spec, c, u, hl, hw, z_eave, rm, mat_idx)
+
+
+def _pitched(m, spec, c, u, hl, hw, z_eave, rm, mat_idx):
+    """A gabled or hipped roof over the rectangle (c, u, hl, hw) with its eaves at z_eave (and its gable ends)."""
     v = np.array([-u[1], u[0]])
     hl2, hw2 = hl + EAVE_M, hw + EAVE_M
     rise = hw2 * math.tan(math.radians(roof_pitch(spec)))
@@ -1619,7 +1750,7 @@ def collision_mesh(specs_and_ground):
             _parking_deck(m, spec, gmin, gmax, _Looks(spec.seed))
             continue
         ring = np.asarray(spec.ring, np.float64)
-        if spec.roof != "flat":
+        if spec.roof != "flat" and not spec.parts:
             c, u, hl, hw = oriented_box(ring)
             v = np.array([-u[1], u[0]])
             ring = np.array([c - u * hl - v * hw, c + u * hl - v * hw, c + u * hl + v * hw, c - u * hl + v * hw])
@@ -1641,6 +1772,35 @@ def collision_mesh(specs_and_ground):
 
 
 # ------------------------------------------------------------------------------------------- a tile
+
+def suburb_flags(rings, attrs, shared, mins):
+    """Per footprint: does it stand among houses (at least SUBURB_MIN_N other ground-level, detached footprints within
+    SUBURB_REACH_M, their median area house-sized, its own at most SUBURB_SPREAD times that)? plan() then takes an
+    unclassified footprint up to SUBURB_HOUSE_M2 for a house. From the footprints alone (data everywhere: ROADMAP
+    "improvements must generalise"); the same tile's footprints give the same answer whatever the anchor."""
+    n = len(rings)
+    if n == 0:
+        return []
+    cs = np.array([np.asarray(r, np.float64).mean(0) for r in rings])
+    areas = np.array([abs(_area2(np.asarray(r, np.float64))) / 2 for r in rings])
+    ok = np.array([mh <= 0.5 and int(sh) == 0 and not at.get("ship") and not at.get("pier")
+                   and (at.get("class") or "").lower() in ("", "house", "detached", "residential", "garage",
+                                                            "bungalow", "semidetached_house")
+                   for at, sh, mh in zip(attrs, shared, mins)])
+    out = [False] * n
+    r2 = SUBURB_REACH_M ** 2
+    for i in range(n):
+        if not ok[i]:
+            continue
+        d2 = ((cs - cs[i]) ** 2).sum(1)
+        near = ok & (d2 < r2) & (areas >= 40.0)
+        near[i] = False
+        if near.sum() < SUBURB_MIN_N:
+            continue
+        med = float(np.median(areas[near]))
+        out[i] = SUBURB_MEDIAN_M2[0] <= med <= SUBURB_MEDIAN_M2[1] and areas[i] <= SUBURB_SPREAD * med
+    return out
+
 
 def _shared_walls(rings, tol=0.6):
     """Per ring, the number of other rings with a vertex within tol of one of its edges (row houses)."""
@@ -2611,8 +2771,11 @@ def tile_buildings(frame, x0, y0, x1, y1, layers, elev, water=None, part_layers=
     up_all = np.full(len(allr), np.nan)
     if ok.any():
         up_all[ok] = np.asarray(frame.geodetic_to_enu(la_all[ok], lo_all[ok], g_all[ok])[2], np.float64)
+    sub = suburb_flags(rings, attrs, shared, mins) if not dense else [False] * len(rings)
     out = []
     for k, (ring, at, sh, look, mh) in enumerate(zip(rings, attrs, shared, looks, mins)):
+        if sub[k]:
+            at = dict(at, suburb=True)
         if mh > 0.5 and at.get("height") is not None and np.isfinite(at["height"]) and look is None:
             at = dict(at, height=max(2.5, float(at["height"]) - mh))     # a building's own height range
         spec = plan(ring, at, int(sh) if look is None else 0, clat, clon, look, town, dense, west_town, alpine)
